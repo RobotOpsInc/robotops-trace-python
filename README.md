@@ -122,6 +122,29 @@ spans = mem.get_finished_spans()                 # inspect exported spans
 robotops.shutdown()
 ```
 
+### Zero-robot-impact guarantee
+
+Tracing is **best-effort and must never affect the robot.** A tracing failure
+never crashes, throws into, or blocks your application (the ROB-418 invariant,
+verified by the ROB-440 fault-injection suite):
+
+- **Non-blocking export.** Spans are handed to a `BatchSpanProcessor` and
+  exported on a background thread — your `@trace`/`span()` calls never touch the
+  network. If the carrier is **down or slow**, export is dropped/best-effort and
+  your code runs at ~no-op speed. (Measured: 2000 traced calls in ~90 ms against
+  a dead/hung endpoint, vs. ~19 ms with tracing disabled.)
+- **Bounded shutdown/flush.** `force_flush(timeout=...)` and
+  `shutdown(timeout=...)` are hard-bounded in wall-clock time, so a stuck agent
+  can never wedge process teardown. A bounded per-export network timeout
+  (`export_timeout_ms`) caps how long the background thread can sit on a slow
+  carrier.
+- **Your exceptions still propagate.** An exception raised inside a traced
+  function or `span()` block propagates **unchanged**; the span is still closed
+  and records the error (ERROR status + an `exception` event). Only *tracing's
+  own* failures are swallowed — yours are never hidden.
+- **Kill switch.** `ROBOTOPS_TRACE_ENABLED=0` (or never calling `init()`) makes
+  the decorator and context managers pure no-ops that produce no spans.
+
 ### Environment variables
 
 Every `Config` field has an env override; **env always wins**, so a fleet can
@@ -135,6 +158,7 @@ retune or kill-switch without a redeploy.
 | `ROBOTOPS_TRACE_MAX_QUEUE` | bounded queue capacity (drop when full) |
 | `ROBOTOPS_TRACE_MAX_BATCH` | max spans per export call |
 | `ROBOTOPS_TRACE_SCHEDULE_DELAY_MS` | periodic flush interval |
+| `ROBOTOPS_TRACE_EXPORT_TIMEOUT_MS` | bounded per-export network timeout (default 10000) |
 
 ```sh
 export ROBOTOPS_OTLP_ENDPOINT=http://127.0.0.1:4318
