@@ -63,9 +63,9 @@ jobs:
           echo "CHANGELOG.md has entry for version ${VERSION}"
 
       - name: Check version against PyPI
+        env:
+          NEW_VERSION: ${{ steps.pyproject_version.outputs.version }}
         run: |
-          NEW_VERSION="${{ steps.pyproject_version.outputs.version }}"
-
           # Query PyPI's JSON API for the published releases of robotops-trace.
           # A 404 means the package has never been published — first publish allowed.
           HTTP_CODE=$(curl -fsS -o pypi.json -w "%{http_code}" \
@@ -81,40 +81,5 @@ jobs:
             exit 0
           fi
 
-          # Highest published version, using PEP 440-aware comparison via packaging.
-          LATEST=$(python - <<'PY'
-import json
-from packaging.version import Version, InvalidVersion
-
-with open("pypi.json") as fh:
-    data = json.load(fh)
-
-versions = []
-for v in data.get("releases", {}):
-    try:
-        versions.append(Version(v))
-    except InvalidVersion:
-        pass
-
-print(max(versions)) if versions else print("")
-PY
-)
-
-          if [[ -z "$LATEST" ]]; then
-            echo "No published versions found on PyPI. First publish allowed."
-            exit 0
-          fi
-
-          echo "Latest published version: $LATEST"
-          echo "New version: $NEW_VERSION"
-
-          python - "$NEW_VERSION" "$LATEST" <<'PY'
-import sys
-from packaging.version import Version
-
-new, latest = Version(sys.argv[1]), Version(sys.argv[2])
-if new <= latest:
-    print(f"::error::New version ({new}) must be greater than published version ({latest})")
-    sys.exit(1)
-print(f"Version check passed: {new} > {latest}")
-PY
+          # Compare against the highest published version using PEP 440 ordering.
+          python .github/scripts/check_pypi_version.py "$NEW_VERSION" pypi.json
