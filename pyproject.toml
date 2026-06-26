@@ -26,11 +26,14 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    # The core is OpenTelemetry-compatible: spans are exported over OTLP to the
-    # local carrier (robot_agent / collector). These are real deps so the OTLP
-    # lane is wired, but the module stays importable as a stub (see ROB-420).
+    # The core builds on the opentelemetry-sdk; our public API is a thin
+    # ergonomic layer over it. Spans are exported over OTLP/HTTP (protobuf) to
+    # the local carrier (robot_agent / collector). We depend on the
+    # proto-http exporter specifically (NOT the generic otlp meta-package) to
+    # keep the footprint light and avoid pulling in gRPC (see ROB-420).
+    "opentelemetry-api>=1.20.0",
     "opentelemetry-sdk>=1.20.0",
-    "opentelemetry-exporter-otlp>=1.20.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.20.0",
 ]
 
 [project.optional-dependencies]
@@ -59,3 +62,9 @@ select = ["E", "F", "I", "W", "UP", "B"]
 python_version = "3.10"
 strict = true
 files = ["src/robotops"]
+
+# OpenTelemetry's exporter/proto packages don't all ship inline types; don't
+# fail strict type-checking of our own code on third-party import resolution.
+[[tool.mypy.overrides]]
+module = ["opentelemetry.*"]
+ignore_missing_imports = true
