@@ -13,6 +13,9 @@ in a site-packages directory of an *installed* distribution. These tests exercis
 the hook module and the exact ``.pth`` source line directly; the genuine
 site-processing path (real ``pip install`` into a fresh venv) is verified in the
 PR's container run and documented there.
+
+Real init state lives in ``robotops._provider`` (the OTel TracerProvider +
+``_initialized`` flag); these tests read/reset it there.
 """
 
 from __future__ import annotations
@@ -21,20 +24,35 @@ import importlib
 import os
 import subprocess
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
 import robotops
+import robotops._provider as _provider
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PTH_FILE = REPO_ROOT / "robotops_autoinit.pth"
 
 
+def _reset_provider() -> None:
+    """Tear down any live provider and reset the global init state."""
+    try:
+        robotops.shutdown()
+    except Exception:  # noqa: BLE001 - best-effort teardown
+        pass
+    _provider._provider = None
+    _provider._initialized = False
+
+
 @pytest.fixture(autouse=True)
-def _reset_state() -> None:
-    """Reset the SDK + drop the cached hook module so each test re-runs it."""
-    robotops._initialized = False
+def _reset_state() -> Iterator[None]:
+    """Reset SDK state + drop the cached hook module so each test re-runs it."""
+    _reset_provider()
+    sys.modules.pop("robotops._autoinit", None)
+    yield
+    _reset_provider()
     sys.modules.pop("robotops._autoinit", None)
 
 
@@ -45,7 +63,7 @@ def _import_hook() -> None:
 def test_hook_initializes_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ROBOTOPS_TRACE_AUTOINIT", "1")
     _import_hook()
-    assert robotops._initialized is True
+    assert _provider._initialized is True
 
 
 @pytest.mark.parametrize("value", ["true", "TRUE", "yes", "on"])
@@ -54,19 +72,19 @@ def test_hook_accepts_truthy_spellings(
 ) -> None:
     monkeypatch.setenv("ROBOTOPS_TRACE_AUTOINIT", value)
     _import_hook()
-    assert robotops._initialized is True
+    assert _provider._initialized is True
 
 
 def test_hook_noop_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ROBOTOPS_TRACE_AUTOINIT", "0")
     _import_hook()
-    assert robotops._initialized is False
+    assert _provider._initialized is False
 
 
 def test_hook_noop_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("ROBOTOPS_TRACE_AUTOINIT", raising=False)
     _import_hook()
-    assert robotops._initialized is False
+    assert _provider._initialized is False
 
 
 def test_pth_file_shipped_and_executes() -> None:
@@ -76,7 +94,11 @@ def test_pth_file_shipped_and_executes() -> None:
     # `site` only executes .pth lines that start with `import`.
     assert line.startswith("import ")
 
-    probe = line + "\nimport robotops; print('AUTOINIT', robotops._initialized)"
+    probe = (
+        line
+        + "\nimport robotops, robotops._provider as p"
+        + "\nprint('AUTOINIT', p._initialized)"
+    )
 
     enabled = subprocess.run(
         [sys.executable, "-c", probe],
