@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Env-default auto-init (ROB-421), the Datadog `-javaagent` model: set
+  `ROBOTOPS_TRACE_AUTOINIT=1` once in the launch environment and every Python
+  process auto-initializes tracing with zero per-process code. Shipped as a
+  `robotops_autoinit.pth` startup hook (force-included into the wheel at the
+  site-packages root) that imports the new `robotops._autoinit` module at
+  interpreter startup; the module calls `robotops.init()` when the env var is
+  truthy (`1`/`true`/`yes`/`on`) and is a no-op otherwise. Importing the hook
+  never raises, so auto-init can't break process startup.
+
+### Changed
+
+- `robotops.init()` is now explicitly idempotent (early-returns once
+  initialized), so an explicit call after env-default auto-init is a safe
+  override and never double-initializes.
+
 ## [0.1.0] - 2026-06-26
 
 ### Added

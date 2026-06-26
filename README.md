@@ -43,16 +43,29 @@ with robotops.span("execute_trajectory", controller="joint_traj"):
 ### Auto-init (env-default)
 
 Following the Datadog `-javaagent` model, you set tracing on **once** in the
-launch environment and every process auto-instruments with zero per-process
-code — no explicit `init()` call needed:
+launch environment and every Python process auto-instruments with zero
+per-process code — no explicit `init()` call needed:
 
 ```sh
-export ROBOTOPS_TRACE_AUTOINIT=1            # auto-import hook turns tracing on
+export ROBOTOPS_TRACE_AUTOINIT=1              # truthy: 1 / true / yes / on
 export ROBOTOPS_OTLP_ENDPOINT=127.0.0.1:4317  # point the exporter at the local carrier
 ```
 
-Processes launched **outside** that environment still work by calling
-`robotops.init()` explicitly. (Auto-init mechanics are ROB-421.)
+**How it works:** the wheel installs a `robotops_autoinit.pth` file into
+site-packages. Because the file's single line begins with `import`, Python's
+`site` module executes it at interpreter startup; it imports the tiny
+`robotops._autoinit` hook **only when `ROBOTOPS_TRACE_AUTOINIT` is set**, and the
+hook calls `robotops.init()` when the value is truthy. Importing the hook never
+raises, so a process can never fail to start because of auto-init.
+
+Processes launched **outside** that environment (or without the env var) are
+unaffected and keep calling `robotops.init()` explicitly — the override path. The
+explicit call is idempotent with auto-init, so there is never a double-initialize.
+
+> The `.pth` hook only fires for an **installed** distribution (it must live in a
+> site-packages directory). It does not run for a bare source/`-e` checkout that
+> doesn't place the `.pth` into a site directory; in that case call
+> `robotops.init()` explicitly.
 
 ## Development
 

@@ -61,6 +61,11 @@ def init(
         **kwargs: Reserved for forward-compatible options.
     """
     global _initialized
+    # Idempotent: a second init() (e.g. an explicit call after the ROB-421
+    # env-default auto-init already ran at startup) is a no-op, so the explicit
+    # path stays a safe override and never double-initializes.
+    if _initialized:
+        return
     # TODO(ROB-420): build the OTel TracerProvider + OTLP exporter, read
     # ROBOTOPS_OTLP_ENDPOINT / ROBOTOPS_TRACE_AUTOINIT, install propagators.
     _initialized = True
