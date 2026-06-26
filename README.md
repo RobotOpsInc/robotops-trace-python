@@ -8,10 +8,12 @@ in-process; a local **carrier** (the `robot_agent` / OTLP collector) receives
 them over OTLP and forwards them off-robot. It is OpenTelemetry-compatible and
 has **no ROS dependency**.
 
-> **Status: scaffold (ROB-419).** The public API is in place and import-safe,
-> but the bodies are no-ops. Real tracing — contextvars propagation, async
-> capture/restore, OTLP exporter wiring — lands in **ROB-420**. Do not expect
-> spans to be emitted yet.
+> **Status: v0.1.0 (first core cut, ROB-420).** The SDK core is implemented: the
+> `@trace` decorator (sync + async), the `span()` sync/async context manager,
+> contextvars-backed parent/child nesting, async/thread-pool context carry, W3C
+> `traceparent` inject/extract, and an **OTLP/HTTP (protobuf)** exporter. The
+> public API is a thin ergonomic layer over the `opentelemetry-sdk` and mirrors
+> the C++ core (ROB-419) so the two SDKs feel like one product.
 
 ## Install
 
@@ -22,22 +24,120 @@ pip install robotops-trace
 - **Package name:** `robotops-trace` (PyPI) - RobotOps' first PyPI package.
 - **Import name:** `robotops`.
 
+Built on `opentelemetry-sdk`; spans are exported over OTLP/HTTP (protobuf) to a
+local carrier (the `robot_agent` / an OTLP collector).
+
 ## Usage
+
+### Lifecycle + the `@trace` decorator
 
 ```python
 import robotops
 
-# Explicit initialization (override path).
-robotops.init(endpoint="127.0.0.1:4317", service_name="path_planner")
+robotops.init()                                  # reads env; idempotent
 
-# Decorate a function → one span per call.
-@robotops.trace
+@robotops.trace                                  # span named after the function
 def plan_path(start, goal):
     ...
 
-# Or scope a span around a block.
-with robotops.span("execute_trajectory", controller="joint_traj"):
+@robotops.trace(name="grasp", kind=robotops.SpanKind.CLIENT,
+                attributes={"robot.action.result": "SUCCEEDED"})
+def grasp():
     ...
+
+robotops.shutdown()                              # flush + release
+```
+
+`@trace` also wraps `async def` — async spans nest correctly across `await`:
+
+```python
+@robotops.trace
+async def execute():
+    await drive()                                # child spans nest under execute
+```
+
+### Scoped spans with attributes, status, and events
+
+`span()` is both a sync **and** an async context manager and yields a `Span`
+handle:
+
+```python
+with robotops.span("control") as s:
+    s.set_attribute("count", 7)
+    s.set_attribute("retry", True)
+    s.add_event("grasp aborted", {"force_n": 12.0})
+    s.set_status(robotops.StatusCode.ERROR, "no plan")
+
+async with robotops.span("io"):                  # async scope
+    ...
+```
+
+Nesting is automatic and deterministic (contextvars): a span opened while
+another is live inherits its `trace_id` and parents under it.
+
+### Async / thread-pool context carry (capture on submit, restore on run)
+
+Context follows `await` automatically, but does **not** cross a thread/executor
+boundary on its own. Capture it on the producer and re-attach it on the worker:
+
+```python
+from concurrent.futures import ThreadPoolExecutor
+
+def worker(ctx):
+    with robotops.attach(ctx):                   # restore on this thread
+        with robotops.span("async_work"):        # nests under the captured span
+            ...
+
+with robotops.span("producer"):
+    ctx = robotops.capture_context()             # snapshot on the calling thread
+    with ThreadPoolExecutor() as pool:
+        pool.submit(worker, ctx).result()
+```
+
+### Cross-process propagation (W3C `traceparent`)
+
+```python
+header = robotops.inject_traceparent()           # "00-<trace>-<span>-<flags>"
+# ... send `header` over the wire ...
+sc = robotops.extract_traceparent(received)      # -> SpanContext (remote=True)
+```
+
+### Current span + flush
+
+```python
+span = robotops.current_span()                   # no-op-safe handle
+robotops.force_flush(timeout=5.0)                # drain the export queue
+```
+
+### Custom exporter (e.g. for tests)
+
+```python
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+mem = InMemorySpanExporter()
+robotops.init(robotops.Config(service_name="grasp_node", exporter=mem))
+# ... open spans ...
+robotops.force_flush()
+spans = mem.get_finished_spans()                 # inspect exported spans
+robotops.shutdown()
+```
+
+### Environment variables
+
+Every `Config` field has an env override; **env always wins**, so a fleet can
+retune or kill-switch without a redeploy.
+
+| Variable | Effect |
+| --- | --- |
+| `ROBOTOPS_SERVICE_NAME` | `service.name` resource attribute |
+| `ROBOTOPS_OTLP_ENDPOINT` | OTLP base URL; `/v1/traces` is appended (default `http://127.0.0.1:4318`) |
+| `ROBOTOPS_TRACE_ENABLED` | `0`/`false`/`off` hard-disables tracing (the runtime kill switch) |
+| `ROBOTOPS_TRACE_MAX_QUEUE` | bounded queue capacity (drop when full) |
+| `ROBOTOPS_TRACE_MAX_BATCH` | max spans per export call |
+| `ROBOTOPS_TRACE_SCHEDULE_DELAY_MS` | periodic flush interval |
+
+```sh
+export ROBOTOPS_OTLP_ENDPOINT=http://127.0.0.1:4318
 ```
 
 ### Auto-init (env-default)
@@ -47,8 +147,8 @@ launch environment and every Python process auto-instruments with zero
 per-process code — no explicit `init()` call needed:
 
 ```sh
-export ROBOTOPS_TRACE_AUTOINIT=1              # truthy: 1 / true / yes / on
-export ROBOTOPS_OTLP_ENDPOINT=127.0.0.1:4317  # point the exporter at the local carrier
+export ROBOTOPS_TRACE_AUTOINIT=1                     # truthy: 1 / true / yes / on
+export ROBOTOPS_OTLP_ENDPOINT=http://127.0.0.1:4318  # point the exporter at the local carrier
 ```
 
 **How it works:** the wheel installs a `robotops_autoinit.pth` file into
