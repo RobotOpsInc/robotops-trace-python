@@ -70,6 +70,7 @@ def _resolve_config(config: Config | None) -> Config:
         ("ROBOTOPS_TRACE_MAX_QUEUE", "max_queue"),
         ("ROBOTOPS_TRACE_MAX_BATCH", "max_batch"),
         ("ROBOTOPS_TRACE_SCHEDULE_DELAY_MS", "schedule_delay_ms"),
+        ("ROBOTOPS_TRACE_EXPORT_TIMEOUT_MS", "export_timeout_ms"),
     ):
         raw = os.environ.get(env_name)
         if raw is not None:
@@ -92,7 +93,13 @@ def _build_processor(cfg: Config) -> SpanProcessor:
     from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 
     traces_endpoint = cfg.endpoint.rstrip("/") + "/v1/traces"
-    exporter = OTLPSpanExporter(endpoint=traces_endpoint)
+    # A bounded network timeout is part of the zero-robot-impact invariant: it
+    # caps how long the background export thread can sit on a slow/unreachable
+    # carrier, so a stuck agent can't wedge force_flush()/shutdown().
+    exporter = OTLPSpanExporter(
+        endpoint=traces_endpoint,
+        timeout=max(cfg.export_timeout_ms, 1) / 1000,
+    )
     return BatchSpanProcessor(
         exporter,
         max_queue_size=cfg.max_queue,
@@ -134,35 +141,76 @@ def init(config: Config | None = None) -> None:
             _initialized = True
 
 
-def shutdown() -> None:
-    """Flush + release the provider. Idempotent; never raises."""
+def shutdown(timeout: float = 10.0) -> None:
+    """Flush + release the provider, bounded by ``timeout`` (seconds).
+
+    Idempotent and never raises. The flush/join runs on a daemon thread so a
+    slow/unreachable carrier can never wedge the caller past ``timeout`` — part
+    of the zero-robot-impact invariant. (The SDK's own export worker is a daemon
+    thread too, so any abandoned in-flight export dies with the process and never
+    blocks shutdown.)
+    """
     global _provider, _tracer, _initialized
     with _lock:
         provider = _provider
         _provider = None
         _tracer = _NOOP_TRACER
         _initialized = False
-    if provider is not None:
+    if provider is None:
+        return
+
+    def _do_shutdown() -> None:
         try:
             provider.shutdown()
         except Exception:  # pragma: no cover - defensive
             _logger.exception("robotops.shutdown() failed")
 
+    done = threading.Thread(target=_do_shutdown, name="robotops-shutdown", daemon=True)
+    done.start()
+    done.join(timeout)
+    if done.is_alive():
+        _logger.warning(
+            "robotops.shutdown() exceeded %.3fs; abandoning the in-flight export "
+            "to a slow/unreachable carrier (best-effort, never blocks the host)",
+            timeout,
+        )
+
 
 def force_flush(timeout: float = 5.0) -> bool:
     """Block until the queue is drained or ``timeout`` (seconds) elapses.
 
-    Returns True if fully drained (or nothing to flush). Never raises.
+    Returns True if fully drained (or nothing to flush), False otherwise. Never
+    raises and never blocks the caller past ``timeout``: the drain runs on a
+    daemon thread and is abandoned (best-effort) once the bound elapses, so a
+    wedged carrier can't gate the caller. This enforces the zero-robot-impact
+    invariant even though the underlying SDK's ``force_flush`` may itself ignore
+    the timeout and block on a full-queue drain.
     """
     with _lock:
         provider = _provider
     if provider is None:
         return True
-    try:
-        return bool(provider.force_flush(timeout_millis=int(timeout * 1000)))
-    except Exception:  # pragma: no cover - defensive
-        _logger.exception("robotops.force_flush() failed")
+
+    result: list[bool] = []
+
+    def _do_flush() -> None:
+        try:
+            result.append(bool(provider.force_flush(timeout_millis=int(timeout * 1000))))
+        except Exception:  # pragma: no cover - defensive
+            _logger.exception("robotops.force_flush() failed")
+            result.append(False)
+
+    worker = threading.Thread(target=_do_flush, name="robotops-force-flush", daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        _logger.warning(
+            "robotops.force_flush() exceeded %.3fs; returning best-effort (the "
+            "background drain to a slow/unreachable carrier continues off-thread)",
+            timeout,
+        )
         return False
+    return result[0] if result else False
 
 
 def get_tracer() -> Tracer:

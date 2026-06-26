@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Zero-Robot-Impact Invariant test suite + hardening (ROB-440).** Empirical
+  proof that a tracing failure never crashes, throws into, or blocks the host
+  (the ROB-418 invariant):
+  - **Fault-injection tests** point the *real* OTLP/HTTP exporter at a dead
+    (connection-refused) endpoint **and** a slow one (a socket server that
+    accepts then never replies) and assert that N decorated/`span()` calls run
+    at ~no-op speed (export rides the `BatchSpanProcessor` background thread, so
+    the caller never touches the network), that no tracing exception reaches the
+    caller, and that `force_flush()`/`shutdown()` return within their bound even
+    while the carrier is wedged. (Container run: 2000 traced calls in ~90 ms vs.
+    ~19 ms disabled baseline, against a 1.5 s export timeout.)
+  - **Exception-passthrough tests** prove a user exception raised in a `@trace`
+    function or a `with robotops.span()` block (sync + async) propagates
+    unchanged while the span still closes with ERROR status and a recorded
+    `exception` event.
+  - **No-op-when-disabled tests** prove `ROBOTOPS_TRACE_ENABLED=0`/uninitialized
+    runs the user code, produces no spans, never raises, and still propagates
+    user exceptions.
+- New `Config.export_timeout_ms` (env `ROBOTOPS_TRACE_EXPORT_TIMEOUT_MS`,
+  default 10000): a **bounded per-export network timeout** passed to the
+  OTLP/HTTP exporter so a stuck carrier can't keep the background export thread
+  (and thus a flush/shutdown) blocked on OpenTelemetry's default 10 s timeout +
+  retry backoff.
+
+### Fixed
+
+- `force_flush(timeout=...)` and `shutdown()` are now **hard-bounded** in
+  wall-clock time. The underlying OpenTelemetry `BatchProcessor.force_flush`
+  ignores its timeout (it blocks on an unconditional full-queue drain) and
+  `shutdown` only honours a 30 s default; both could wedge the caller against a
+  slow/unreachable carrier. The flush/shutdown now run on a daemon thread joined
+  with the requested bound, so the host is never blocked past the timeout (the
+  SDK's export worker is itself a daemon, so any abandoned in-flight export dies
+  with the process). `shutdown()` gains an optional `timeout` parameter
+  (default 10 s).
+
 - Env-default auto-init (ROB-421), the Datadog `-javaagent` model: set
   `ROBOTOPS_TRACE_AUTOINIT=1` once in the launch environment and every Python
   process auto-initializes tracing with zero per-process code. Shipped as a

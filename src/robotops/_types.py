@@ -197,6 +197,11 @@ class Config:
     max_batch: int = 512
     # env ROBOTOPS_TRACE_SCHEDULE_DELAY_MS — periodic flush interval.
     schedule_delay_ms: int = 5000
+    # env ROBOTOPS_TRACE_EXPORT_TIMEOUT_MS — bounded per-export network timeout.
+    # Caps how long a single OTLP/HTTP export call may block the background
+    # export thread when the carrier is slow/unreachable, so a stuck agent can
+    # never wedge force_flush()/shutdown() (the zero-robot-impact invariant).
+    export_timeout_ms: int = 10000
     # None => default OTLP/HTTP-protobuf exporter built from `endpoint`.
     # Inject an OTel SpanExporter (e.g. InMemorySpanExporter) for tests.
     exporter: SpanExporter | None = None
