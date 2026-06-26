@@ -51,6 +51,13 @@ Changelog = "https://github.com/RobotOpsInc/robotops-trace-python/blob/main/CHAN
 [tool.hatch.build.targets.wheel]
 packages = ["src/robotops"]
 
+# Ship the auto-init startup hook (ROB-421) at the site-packages root so the
+# interpreter's `site` module executes its `import` line at startup. force-include
+# maps the repo-root .pth to the wheel root (purelib), which installs into
+# site-packages/ alongside the `robotops` package.
+[tool.hatch.build.targets.wheel.force-include]
+"robotops_autoinit.pth" = "robotops_autoinit.pth"
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"
