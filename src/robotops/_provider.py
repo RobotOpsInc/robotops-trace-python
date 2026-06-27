@@ -92,14 +92,31 @@ def _build_processor(cfg: Config) -> SpanProcessor:
     # or the test path that injects its own exporter.
     from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 
-    traces_endpoint = cfg.endpoint.rstrip("/") + "/v1/traces"
     # A bounded network timeout is part of the zero-robot-impact invariant: it
     # caps how long the background export thread can sit on a slow/unreachable
-    # carrier, so a stuck agent can't wedge force_flush()/shutdown().
-    exporter = OTLPSpanExporter(
-        endpoint=traces_endpoint,
-        timeout=max(cfg.export_timeout_ms, 1) / 1000,
-    )
+    # carrier, so a stuck agent can't wedge force_flush()/shutdown(). It applies
+    # equally to the UDS and TCP transports.
+    timeout_s = max(cfg.export_timeout_ms, 1) / 1000
+
+    # Transport selection (shared contract with the C++ exporter + agent):
+    #   unix:///abs/path  => OTLP/HTTP-protobuf over a Unix-domain socket (default)
+    #   http://host:port  => OTLP/HTTP-protobuf over TCP (loopback fallback)
+    # Both POST a protobuf body to /v1/traces.
+    if cfg.endpoint.startswith("unix://"):
+        from ._uds import build_uds_session, socket_path_from_endpoint, uds_traces_endpoint
+
+        socket_path = socket_path_from_endpoint(cfg.endpoint)
+        exporter = OTLPSpanExporter(
+            endpoint=uds_traces_endpoint(socket_path),
+            timeout=timeout_s,
+            session=build_uds_session(),
+        )
+    else:
+        traces_endpoint = cfg.endpoint.rstrip("/") + "/v1/traces"
+        exporter = OTLPSpanExporter(
+            endpoint=traces_endpoint,
+            timeout=timeout_s,
+        )
     return BatchSpanProcessor(
         exporter,
         max_queue_size=cfg.max_queue,
