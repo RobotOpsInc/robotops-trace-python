@@ -186,7 +186,10 @@ class Config:
     # env ROBOTOPS_SERVICE_NAME overrides.
     service_name: str = "unknown_service"
     # env ROBOTOPS_OTLP_ENDPOINT overrides; "/v1/traces" is appended.
-    endpoint: str = "http://127.0.0.1:4318"
+    # Default is a Unix-domain socket (ROB-441): "unix:///abs/path" selects the
+    # UDS transport, "http://host:port" selects the TCP loopback fallback. Both
+    # POST a protobuf body to /v1/traces.
+    endpoint: str = "unix:///run/robotops/trace.sock"
     # env ROBOTOPS_TRACE_ENABLED=0 hard-disables (the runtime kill switch).
     enabled: bool = True
     # Extra resource attributes merged with service.name.

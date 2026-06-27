@@ -75,3 +75,11 @@ files = ["src/robotops"]
 [[tool.mypy.overrides]]
 module = ["opentelemetry.*"]
 ignore_missing_imports = true
+
+# The UDS transport (ROB-441) subclasses requests/urllib3 connection internals.
+# These ship no usable stubs for the private classes we extend; skip them so
+# strict checking of our own code isn't gated on third-party type resolution.
+[[tool.mypy.overrides]]
+module = ["requests.*", "urllib3.*"]
+ignore_missing_imports = true
+follow_imports = "skip"

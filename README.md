@@ -145,6 +145,42 @@ verified by the ROB-440 fault-injection suite):
 - **Kill switch.** `ROBOTOPS_TRACE_ENABLED=0` (or never calling `init()`) makes
   the decorator and context managers pure no-ops that produce no spans.
 
+### Transport (Unix-domain socket by default, TCP loopback fallback)
+
+Spans are exported as **OTLP/HTTP (protobuf)** to the local carrier (the
+`robot_agent` / an OTLP collector). The carrier address is `ROBOTOPS_OTLP_ENDPOINT`
+(or `Config.endpoint`); two transports are supported and selected by scheme:
+
+| Endpoint | Transport |
+| --- | --- |
+| `unix:///abs/path` | **Unix-domain socket** (default) — POST `/v1/traces` over `AF_UNIX` |
+| `http://host:port` | **TCP loopback** — POST `/v1/traces` over TCP |
+
+The **default** is `unix:///run/robotops/trace.sock`. The UDS transport is the
+shared contract with the C++ exporter and the agent receiver: a host-local
+socket avoids exposing a TCP port, needs no port allocation, and keeps trace
+traffic on-host. Both transports POST the identical protobuf body to `/v1/traces`
+— only the dialing differs.
+
+```sh
+export ROBOTOPS_OTLP_ENDPOINT=unix:///run/robotops/trace.sock   # UDS (default)
+export ROBOTOPS_OTLP_ENDPOINT=http://127.0.0.1:4318             # TCP fallback
+```
+
+Under the hood the UDS path mounts a tiny `requests` transport adapter
+(`AF_UNIX` connection, ~40 lines on the `requests`/`urllib3` the OTLP HTTP
+exporter already ships) onto the exporter's `requests.Session`; the stock OTel
+`OTLPSpanExporter` still drives the protobuf encode + POST. **No new third-party
+dependency is added.**
+
+**Containers.** When the SDK runs in a container and the agent owns the socket
+on the host, bind-mount the socket directory into the container (e.g.
+`-v /run/robotops:/run/robotops`) so `/run/robotops/trace.sock` is reachable, or
+fall back to TCP loopback with `ROBOTOPS_OTLP_ENDPOINT=http://host:4318`. If the
+socket is absent (agent down / not mounted), export fails best-effort on the
+background thread and your code is unaffected — see the zero-robot-impact
+guarantee above.
+
 ### Environment variables
 
 Every `Config` field has an env override; **env always wins**, so a fleet can
@@ -153,7 +189,7 @@ retune or kill-switch without a redeploy.
 | Variable | Effect |
 | --- | --- |
 | `ROBOTOPS_SERVICE_NAME` | `service.name` resource attribute |
-| `ROBOTOPS_OTLP_ENDPOINT` | OTLP base URL; `/v1/traces` is appended (default `http://127.0.0.1:4318`) |
+| `ROBOTOPS_OTLP_ENDPOINT` | OTLP carrier endpoint; `unix:///abs/path` (UDS) or `http://host:port` (TCP); `/v1/traces` is the POST path (default `unix:///run/robotops/trace.sock`) |
 | `ROBOTOPS_TRACE_ENABLED` | `0`/`false`/`off` hard-disables tracing (the runtime kill switch) |
 | `ROBOTOPS_TRACE_MAX_QUEUE` | bounded queue capacity (drop when full) |
 | `ROBOTOPS_TRACE_MAX_BATCH` | max spans per export call |
@@ -161,7 +197,7 @@ retune or kill-switch without a redeploy.
 | `ROBOTOPS_TRACE_EXPORT_TIMEOUT_MS` | bounded per-export network timeout (default 10000) |
 
 ```sh
-export ROBOTOPS_OTLP_ENDPOINT=http://127.0.0.1:4318
+export ROBOTOPS_OTLP_ENDPOINT=unix:///run/robotops/trace.sock
 ```
 
 ### Auto-init (env-default)
@@ -171,8 +207,8 @@ launch environment and every Python process auto-instruments with zero
 per-process code — no explicit `init()` call needed:
 
 ```sh
-export ROBOTOPS_TRACE_AUTOINIT=1                     # truthy: 1 / true / yes / on
-export ROBOTOPS_OTLP_ENDPOINT=http://127.0.0.1:4318  # point the exporter at the local carrier
+export ROBOTOPS_TRACE_AUTOINIT=1                          # truthy: 1 / true / yes / on
+export ROBOTOPS_OTLP_ENDPOINT=unix:///run/robotops/trace.sock  # local carrier (UDS default; or http://host:4318)
 ```
 
 **How it works:** the wheel installs a `robotops_autoinit.pth` file into

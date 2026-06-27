@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Unix-domain-socket transport for the OTLP/HTTP exporter (ROB-441).** The
+  exporter now speaks OTLP/HTTP (protobuf) over a **Unix-domain socket** as well
+  as TCP, selected by the endpoint scheme — the shared transport contract with
+  the C++ exporter and the agent receiver:
+  - `ROBOTOPS_OTLP_ENDPOINT=unix:///abs/path` (or `Config.endpoint`) ⇒ UDS;
+    `http://host:port` ⇒ TCP loopback. Both POST a protobuf body to `/v1/traces`.
+  - **Default endpoint changed** from `http://127.0.0.1:4318` to
+    `unix:///run/robotops/trace.sock`. Deployments that relied on the TCP default
+    must set `ROBOTOPS_OTLP_ENDPOINT=http://127.0.0.1:4318` explicitly.
+  - The UDS path mounts a tiny `requests` transport adapter (an `AF_UNIX`
+    connection over the `requests`/`urllib3` the OTLP HTTP exporter already
+    pulls in) onto the exporter's `requests.Session`; the stock OTel
+    `OTLPSpanExporter` still drives the protobuf encode + POST. **No new
+    third-party dependency.** The ROB-440 bounded `export_timeout_ms` applies to
+    the UDS transport too (the adapter sets the socket timeout).
+  - Zero-robot-impact preserved: a missing socket (agent down / not mounted)
+    fails best-effort on the `BatchSpanProcessor` background thread and never
+    blocks or raises into user code, exactly like the TCP path.
+  - New tests prove a **real UDS round-trip** (a throwaway HTTP server bound to a
+    Unix socket receives a decodable OTLP `ExportTraceServiceRequest` carrying
+    the emitted spans), TCP fallback still delivers, and socket-absent runs at
+    ~no-op speed with bounded flush/shutdown. (Container run: 418-byte OTLP
+    protobuf delivered over both UDS and TCP; 2000 traced calls in ~90 ms against
+    an absent socket.)
 - **Zero-Robot-Impact Invariant test suite + hardening (ROB-440).** Empirical
   proof that a tracing failure never crashes, throws into, or blocks the host
   (the ROB-418 invariant):
